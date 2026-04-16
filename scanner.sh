@@ -8,6 +8,8 @@ clear
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+MAGENTA='\033[1;35m'
 WHITE='\033[1;37m'
 GRAY='\033[0;37m'
 NC='\033[0m'
@@ -21,37 +23,25 @@ hook_hits=0
 system_hits=0
 app_hits=0
 env_hits=0
-risk_score=0
+
+TOTAL_STEPS=14
+CURRENT_STEP=0
 
 start_time=$(date +%s)
-
 mkdir -p logs
 
 # =========================
-# DETECTAR ADB
+# ADB
 # =========================
 ADB_MODE=false
-
-if command -v adb >/dev/null 2>&1; then
-  if adb get-state 2>/dev/null | grep -q "device"; then
-    ADB_MODE=true
-  fi
+if command -v adb >/dev/null 2>&1 && adb get-state 2>/dev/null | grep -q device; then
+  ADB_MODE=true
 fi
 
-# =========================
-# WRAPPER
-# =========================
 run_cmd() {
-  if $ADB_MODE; then
-    adb shell "$@" 2>/dev/null
-  else
-    "$@" 2>/dev/null
-  fi
+  if $ADB_MODE; then adb shell "$@" 2>/dev/null; else "$@" 2>/dev/null; fi
 }
 
-# =========================
-# DEVICE ID
-# =========================
 device_hash=$(run_cmd getprop ro.serialno | md5sum | cut -c1-8)
 
 # =========================
@@ -59,105 +49,123 @@ device_hash=$(run_cmd getprop ro.serialno | md5sum | cut -c1-8)
 # =========================
 banner() {
   clear
-  echo -e "${WHITE}"
-  echo "╔══════════════════════════════════════╗"
-  echo "║           Scanner Randol             ║"
-  echo "╚══════════════════════════════════════╝"
+  echo -e "${CYAN}"
+  echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+  echo "┃     ANDROID THREAT ANALYZER v3.0     ┃"
+  echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
   echo -e "${NC}"
 
-  if $ADB_MODE; then
-    echo -e "${GREEN}ADB conectado${NC}"
-  else
-    echo -e "${YELLOW}Modo local (limitado)${NC}"
-  fi
+  $ADB_MODE && echo -e "${GREEN}✔ ADB ONLINE${NC}" || echo -e "${YELLOW}⚠ LOCAL MODE${NC}"
+  echo ""
 }
 
-loading() {
-  echo -ne "${WHITE}[$1] ${NC}"
-  for i in {1..10}; do
-    echo -ne "${GRAY}▓${NC}"
-    sleep 0.01
+draw_bar() {
+  percent=$((CURRENT_STEP * 100 / TOTAL_STEPS))
+  filled=$((percent / 5))
+  empty=$((20 - filled))
+  bar=$(printf "%${filled}s" | tr ' ' '█')
+  printf "\r${CYAN}[%-20s]${NC} %3d%%" "$bar" "$percent"
+}
+
+spinner() {
+  local pid=$!
+  local spin='-\|/'
+  while kill -0 $pid 2>/dev/null; do
+    for i in {0..3}; do
+      printf "\r${MAGENTA}[%c]${NC} scanning..." "${spin:$i:1}"
+      sleep 0.08
+    done
   done
-  echo -e " ${GREEN}OK${NC}"
+  printf "\r"
 }
 
-line() {
-  printf "${WHITE}➤ %-12s${NC}: %s\n" "$1" "$2"
+step() { CURRENT_STEP=$((CURRENT_STEP+1)); draw_bar; }
+
+section() {
+  echo ""
+  echo -e "${GRAY}━━━━━━━━ $1 ━━━━━━━━${NC}"
 }
 
 # =========================
-# CHECKS
+# CHECKS AVANÇADOS
 # =========================
 
 check_su() {
-  for p in /system/bin/su /system/xbin/su /sbin/su; do
-    run_cmd ls "$p" >/dev/null && root_hits=$((root_hits+5))
+  for p in /system/bin/su /system/xbin/su /sbin/su /system_ext/bin/su; do
+    run_cmd ls "$p" && root_hits=$((root_hits+5))
   done
-
-  run_cmd which su >/dev/null && root_hits=$((root_hits+5))
-  run_cmd su -c id >/dev/null && root_hits=$((root_hits+25))
+  run_cmd su -c id && root_hits=$((root_hits+30))
 }
 
-check_mounts() {
-  run_cmd mount | grep -E " /system | /vendor " | grep -q "rw," && root_hits=$((root_hits+15))
+check_magisk_hidden() {
+  run_cmd ls /sbin/.magisk && bypass_hits=$((bypass_hits+25))
+  run_cmd ls /data/adb && bypass_hits=$((bypass_hits+15))
+  run_cmd ps -A | grep -Ei "zygisk|magisk" && bypass_hits=$((bypass_hits+20))
+}
+
+check_lsposed() {
+  run_cmd pm list packages | grep -Ei "lsposed|xposed" && hook_hits=$((hook_hits+25))
+}
+
+check_frida_deep() {
+  run_cmd ps -A | grep -i frida && hook_hits=$((hook_hits+25))
+  run_cmd netstat -an | grep -E "27042|27043" && hook_hits=$((hook_hits+20))
+}
+
+check_ports() {
+  ports=$(run_cmd netstat -tuln)
+  echo "$ports" | grep -E "4444|5555|8080" && env_hits=$((env_hits+10))
+}
+
+check_proc_injection() {
+  for pid in $(run_cmd ps -A | awk '{print $2}' | head -n 20); do
+    run_cmd cat /proc/$pid/maps | grep -Ei "frida|inject|hook" && hook_hits=$((hook_hits+10))
+  done
+}
+
+check_binaries() {
+  run_cmd find /data/local/tmp -type f 2>/dev/null | grep -Ei "frida|inject" && bypass_hits=$((bypass_hits+20))
+}
+
+check_permissions() {
+  run_cmd dumpsys package | grep -Ei "android.permission.SYSTEM_ALERT_WINDOW" && app_hits=$((app_hits+10))
 }
 
 check_props() {
-  run_cmd getprop ro.debuggable | grep -q "1" && system_hits=$((system_hits+10))
-  run_cmd getprop ro.secure | grep -q "0" && system_hits=$((system_hits+10))
-  run_cmd getprop ro.build.tags | grep -qi "test-keys" && system_hits=$((system_hits+10))
+  run_cmd getprop ro.debuggable | grep -q 1 && system_hits=$((system_hits+10))
+  run_cmd getprop ro.secure | grep -q 0 && system_hits=$((system_hits+10))
 }
 
-check_magisk() {
-  run_cmd ls /sbin/.magisk >/dev/null && bypass_hits=$((bypass_hits+25))
-  run_cmd ls /data/adb >/dev/null && bypass_hits=$((bypass_hits+15))
-}
-
-check_frida() {
-  run_cmd ps -A | grep -qi frida && hook_hits=$((hook_hits+20))
-  run_cmd netstat -an | grep -E "27042|27043" >/dev/null && hook_hits=$((hook_hits+15))
-}
-
-check_maps() {
-  maps=$(run_cmd cat /proc/self/maps)
-  echo "$maps" | grep -Ei "frida|gum-js|inject" >/dev/null && hook_hits=$((hook_hits+30))
-}
-
-check_tracer() {
-  tracer=$(run_cmd cat /proc/self/status | grep TracerPid | awk '{print $2}')
-  [ "$tracer" != "0" ] && hook_hits=$((hook_hits+20))
-}
-
-check_apps() {
-  run_cmd pm list packages | grep -Ei "hack|cheat|mod|lucky" >/dev/null && app_hits=$((app_hits+20))
+check_logs() {
+  logs=$(run_cmd logcat -d | tail -n 800)
+  echo "$logs" | grep -Ei "magisk|zygisk|frida|xposed" && bypass_hits=$((bypass_hits+20))
 }
 
 check_emulator() {
-  run_cmd getprop ro.product.model | grep -qi "sdk\|emulator" && env_hits=$((env_hits+15))
+  run_cmd getprop ro.product.model | grep -qi emulator && env_hits=$((env_hits+15))
 }
 
 # =========================
-# EXEC
+# EXECUÇÃO
 # =========================
 run_checks() {
-  loading "Checks"
-  check_su
-  check_mounts
-  check_props
-  check_magisk
-  check_frida
-  check_maps
-  check_tracer
-  check_apps
-  check_emulator
-}
+  section "DEEP SCAN"
 
-# =========================
-# IP
-# =========================
-scan_ip() {
-  loading "IP"
-  ip=$(curl -s --max-time 2 ifconfig.me)
+  (
+    check_su; step
+    check_magisk_hidden; step
+    check_lsposed; step
+    check_frida_deep; step
+    check_ports; step
+    check_proc_injection; step
+    check_binaries; step
+    check_permissions; step
+    check_props; step
+    check_logs; step
+    check_emulator; step
+  ) & spinner
+
+  echo ""
 }
 
 # =========================
@@ -165,58 +173,37 @@ scan_ip() {
 # =========================
 final_result() {
 
-  risk_score=$((root_hits + bypass_hits + hook_hits + system_hits + app_hits + env_hits))
+  score=$((root_hits + bypass_hits + hook_hits + system_hits + app_hits + env_hits))
   runtime=$(( $(date +%s) - start_time ))
 
   if [ "$root_hits" -ge 30 ]; then
-    status="ROOT CONFIRMADO"
+    status="ROOT DETECTADO"
     color=$RED
-  elif [ "$risk_score" -ge 70 ]; then
-    status="CRÍTICO"
+  elif [ "$score" -ge 80 ]; then
+    status="COMPROMETIDO"
     color=$RED
-  elif [ "$risk_score" -ge 40 ]; then
+  elif [ "$score" -ge 40 ]; then
     status="ALTO RISCO"
     color=$YELLOW
-  elif [ "$risk_score" -ge 20 ]; then
+  elif [ "$score" -ge 20 ]; then
     status="SUSPEITO"
     color=$YELLOW
   else
-    status="LIMPO"
+    status="SEGURO"
     color=$GREEN
   fi
 
-  log_file="logs/scan_$(date +%H%M%S).json"
+  section "RESULTADO FINAL"
+
+  printf "${WHITE}┌───────────────┬───────────────┐\n"
+  printf "│ Status        │ ${color}%-13s${WHITE} │\n" "$status"
+  printf "│ Score         │ %-13s │\n" "$score"
+  printf "│ Tempo         │ %-13ss│\n" "$runtime"
+  printf "└───────────────┴───────────────┘${NC}\n"
 
   echo ""
-  echo -e "${WHITE}════════ RESULTADO ════════${NC}"
-  echo ""
-
-  echo -e "${color}STATUS: $status${NC}"
-  line "Score" "$risk_score"
-  line "Tempo" "${runtime}s"
-  line "DeviceID" "$device_hash"
-  line "IP" "$ip"
-
-  echo ""
-  line "Root" "$root_hits"
-  line "Bypass" "$bypass_hits"
-  line "Hook" "$hook_hits"
-  line "Sistema" "$system_hits"
-  line "Apps" "$app_hits"
-  line "Ambiente" "$env_hits"
-
-  cat <<EOF > "$log_file"
-{
-  "status": "$status",
-  "score": $risk_score,
-  "runtime": "$runtime",
-  "device": "$device_hash",
-  "ip": "$ip"
-}
-EOF
-
-  echo ""
-  echo -e "${WHITE}Log salvo em: $log_file${NC}"
+  printf "${GRAY}Root:%s  Bypass:%s  Hook:%s  Sys:%s  Apps:%s  Env:%s${NC}\n" \
+    "$root_hits" "$bypass_hits" "$hook_hits" "$system_hits" "$app_hits" "$env_hits"
 }
 
 # =========================
@@ -224,28 +211,18 @@ EOF
 # =========================
 menu() {
   banner
-  echo "[1] Scan"
-  echo "[2] Ver logs"
-  echo "[3] Sair"
+  echo -e "${WHITE}[1] Scan Profundo${NC}"
+  echo -e "${WHITE}[2] Logs${NC}"
+  echo -e "${WHITE}[3] Sair${NC}"
   echo ""
 
-  read -p ">> " opt
+  read -p "➤ " opt
 
   case $opt in
-    1)
-      run_checks
-      scan_ip
-      final_result
-      ;;
-    2)
-      ls logs
-      ;;
-    3)
-      exit
-      ;;
-    *)
-      menu
-      ;;
+    1) run_checks; final_result ;;
+    2) ls logs ;;
+    3) exit ;;
+    *) menu ;;
   esac
 }
 
