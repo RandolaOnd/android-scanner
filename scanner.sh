@@ -10,7 +10,6 @@ GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 MAGENTA='\033[1;35m'
 CYAN='\033[1;36m'
-WHITE='\033[1;37m'
 GRAY='\033[0;37m'
 NC='\033[0m'
 
@@ -21,11 +20,10 @@ system_hits=0
 app_hits=0
 env_hits=0
 
-TOTAL_STEPS=13
+TOTAL_STEPS=20
 CURRENT_STEP=0
 
 start_time=$(date +%s)
-mkdir -p logs
 
 ADB_MODE=false
 if command -v adb >/dev/null 2>&1 && adb get-state 2>/dev/null | grep -q device; then
@@ -40,11 +38,7 @@ get_ps() { run_cmd ps -A 2>/dev/null || run_cmd ps 2>/dev/null; }
 get_ports() { run_cmd ss -tuln 2>/dev/null || run_cmd netstat -tuln 2>/dev/null; }
 get_logcat() { run_cmd logcat -d 2>/dev/null || echo ""; }
 
-device_hash=$(run_cmd getprop ro.serialno | md5sum | cut -c1-8)
-LOG_TXT="logs/scan_${device_hash}.txt"
-LOG_JSON="logs/scan_${device_hash}.json"
-
-exec > >(tee -a "$LOG_TXT") 2>&1
+device_hash=$(run_cmd getprop ro.boot.serialno | md5sum | cut -c1-8)
 
 draw_bar() {
   percent=$((CURRENT_STEP * 100 / TOTAL_STEPS))
@@ -77,15 +71,15 @@ check_magisk() {
   run_cmd ls /sbin/.magisk && bypass_hits=$((bypass_hits+20))
   run_cmd ls /data/adb && bypass_hits=$((bypass_hits+15))
   get_ps | grep -Ei "magisk|zygisk" && bypass_hits=$((bypass_hits+20))
+  run_cmd getprop | grep -i magisk && bypass_hits=$((bypass_hits+10))
+  run_cmd mount | grep -i magisk && bypass_hits=$((bypass_hits+10))
 }
 check_hooks() {
   get_ps | grep -i frida && hook_hits=$((hook_hits+25))
   get_ports | grep -E "27042|27043" && hook_hits=$((hook_hits+20))
 }
 check_injection() {
-  for pid in $(get_ps | awk '{print $2}' | head -n 5); do
-    run_cmd cat /proc/$pid/maps 2>/dev/null | grep -Ei "frida|inject" && hook_hits=$((hook_hits+10))
-  done
+  run_cmd strings /proc/*/maps 2>/dev/null | grep -i frida && hook_hits=$((hook_hits+15))
 }
 check_binaries() { run_cmd find /data/local/tmp -type f 2>/dev/null | grep -Ei "frida" && bypass_hits=$((bypass_hits+10)); }
 check_permissions() { run_cmd dumpsys package | grep -Ei "SYSTEM_ALERT_WINDOW" && app_hits=$((app_hits+5)); }
@@ -96,20 +90,24 @@ check_props() {
 check_env() { get_ports | grep -E "5555" && env_hits=$((env_hits+5)); }
 check_emulator() { run_cmd getprop ro.product.model | grep -qi emulator && env_hits=$((env_hits+10)); }
 check_adb_root() { run_cmd getprop service.adb.root | grep -q 1 && root_hits=$((root_hits+30)); }
-
 check_logs() {
-  suspicious=0
-  for buf in main system events radio; do
-    logs=$(run_cmd logcat -b $buf -d 2>/dev/null | grep -Ei "magisk|frida|xposed|zygisk")
-    [ -n "$logs" ] && echo -e "${RED}▸ Indicadores suspeitos no buffer $buf${NC}" && suspicious=1 && bypass_hits=$((bypass_hits+10))
-  done
-  count=$(get_logcat | wc -l)
-  [ "$count" -lt 50 ] && echo -e "${YELLOW}⚠ Buffer de logs apagado${NC}" && env_hits=$((env_hits+10))
-  lastlog_time=$(run_cmd logcat -d -v time | tail -n 1 | awk '{print $1}')
-  [ -n "$lastlog_time" ] && echo "Último log registrado em: $lastlog_time"
-  [ "$suspicious" -eq 0 ] && echo -e "${GREEN}✔ Nenhum indicador suspeito nos logs${NC}"
+  logs=$(get_logcat)
+  if [ -z "$logs" ]; then
+    echo -e "${YELLOW}⚠ Sem acesso completo ao logcat (não é possível confirmar manipulação)${NC}"
+    env_hits=$((env_hits+5))
+  else
+    echo "$logs" | grep -Ei "magisk|frida|xposed|zygisk" && bypass_hits=$((bypass_hits+10))
+    count=$(echo "$logs" | wc -l)
+    [ "$count" -lt 50 ] && echo -e "${YELLOW}⚠ Buffer de logs apagado${NC}" && env_hits=$((env_hits+10))
+  fi
 }
 check_dev() { run_cmd settings get global adb_enabled | grep -q 1 && echo -e "${YELLOW}⚠ Depuração USB/Wi-Fi ATIVA${NC}"; }
+check_busybox() { run_cmd which busybox && root_hits=$((root_hits+10)); run_cmd which toybox && root_hits=$((root_hits+5)); }
+check_build_tags() { run_cmd getprop ro.build.tags | grep -qi test-keys && root_hits=$((root_hits+20)); }
+check_mounts() { run_cmd mount | grep " /system " | grep -q rw && root_hits=$((root_hits+20)); }
+check_packages() { run_cmd pm list packages | grep -Ei "supersu|magisk" && root_hits=$((root_hits+20)); }
+check_selinux() { run_cmd getenforce | grep -qi permissive && system_hits=$((system_hits+15)); }
+check_overlay() { run_cmd dumpsys window | grep -i overlay && app_hits=$((app_hits+10)); }
 
 # =========================
 # EXECUÇÃO
@@ -127,6 +125,12 @@ check_dev() { run_cmd settings get global adb_enabled | grep -q 1 && echo -e "${
   check_adb_root; step
   check_logs; step
   check_dev; step
+  check_busybox; step
+  check_build_tags; step
+  check_mounts; step
+  check_packages; step
+  check_selinux; step
+  check_overlay; step
 ) & spinner
 
 echo ""
@@ -144,10 +148,18 @@ elif [ "$score" -ge 40 ]; then status="SUSPEITO"; color=$YELLOW
 else status="SEGURO"; color=$GREEN
 fi
 
-section "RESULTADO FINAL"
+echo -e "\nScanner Randol"
+
+section "INFORMAÇÕES"
 echo -e "Status   : ${color}$status${NC}"
-echo "Score    : $score"
-echo "Tempo    : ${runtime}s"
+echo -e "Android  : $(run_cmd getprop ro.build.version.release)"
+echo -e "Dispositivo: $(run_cmd getprop ro.product.model)"
+echo -e "HWID     : $device_hash"
+
+section "RESULTADO"
+echo -e "Alertas  : $((root_hits+bypass_hits+hook_hits+system_hits+app_hits+env_hits))"
+echo -e "Detecções: $score"
+echo -e "Tempo    : ${runtime}s"
 
 section "DETECÇÕES"
 [ "$root_hits" -gt 0 ] && echo -e "${RED}▸ Root/BYPASS detectado${NC}"
@@ -156,29 +168,3 @@ section "DETECÇÕES"
 [ "$system_hits" -gt 0 ] && echo -e "${YELLOW}▸ Sistema em modo DEBUG/INSEGURO${NC}"
 [ "$env_hits" -gt 0 ] && echo -e "${YELLOW}▸ Ambiente suspeito (emulador/ports/logs)${NC}"
 [ "$app_hits" -gt 0 ] && echo -e "${YELLOW}▸ Permissões suspeitas detectadas${NC}"
-
-# =========================
-# EXPORTAÇÃO JSON + PUSH
-# =========================
-cat <<EOF > "$LOG_JSON"
-{
-  "status": "$status",
-  "score": $score,
-  "root_hits": $root_hits,
-  "bypass_hits": $bypass_hits,
-  "hook_hits": $hook_hits,
-  "system_hits": $system_hits,
-  "app_hits": $app_hits,
-  "env_hits": $env_hits,
-  "runtime": $runtime
-}
-EOF
-
-echo -e "\n${CYAN}✔ Logs salvos:${NC}"
-echo "$LOG_TXT"
-echo "$LOG_JSON"
-
-# Push automático para GitHub
-git add "$LOG_TXT" "$LOG_JSON"
-git commit -m "Scanner Randol: $status (score $score)"
-git push origin main
