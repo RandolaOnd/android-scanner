@@ -34,7 +34,7 @@ critico_log_vazia() {
   echo "- pareamento/acesso elevado não ativo"
   echo "- arquivo informado está vazio"
   echo
-  if [ -f /tmp/logcat_erro.txt ]; then
+  if [ -s /tmp/logcat_erro.txt ]; then
     echo -e "${YELLOW}Erro capturado:${RESET}"
     cat /tmp/logcat_erro.txt
   fi
@@ -83,7 +83,7 @@ risco_linha() {
   RISCO="INFO"
   COR="$CYAN"
 
-  if echo "$LOWER" | grep -qE "adbd|wireless debugging|wirelessdebugging|pairing|pareamento|adb_keys|adbkey|uid 2000|uid=2000|com.android.shell|input keyevent|input swipe|input tap|scrcpy|minitouch|shizuku|rikka|tcpip|5555|shell@"; then
+  if echo "$LOWER" | grep -qE "adbd|wireless debugging|wirelessdebugging|pairing|pareamento|adb_keys|adbkey|adbd_auth|usbdebuggingmanager|authorizing|authorized|fingerprint|rsa|confirm key|allow debugging|uid 2000|uid=2000|com.android.shell|input keyevent|input swipe|input tap|scrcpy|minitouch|shizuku|rikka|tcpip|5555|shell@"; then
     RISCO="SUSPEITO"
     COR="$RED"
   elif echo "$LOWER" | grep -qE "input event injection|keycode 3|launch_home|go to home|floatingwindow|floatassistant|gamebooster|overlay|termux|brevent|piebridge|keystore|keymint|error::km"; then
@@ -160,6 +160,7 @@ resumo() {
 
   echo
   echo "ADB / adbd....................: $(grep -icE 'adb|adbd|adb_keys|adbkey|android debug' "$SCANFILE")"
+  echo "ADB RSA / autorização.........: $(grep -icE 'UsbDebuggingManager|adb_keys|adbd_auth|authorizing|authorized|fingerprint|RSA|confirm key|allow debugging' "$SCANFILE")"
   echo "Wireless Debugging............: $(grep -icE 'wireless debugging|wirelessdebugging|pairing|pareamento|tcpip|5555' "$SCANFILE")"
   echo "Shell / UID 2000..............: $(grep -icE 'uid 2000|uid=2000|com.android.shell|shell@|/system/bin/sh' "$SCANFILE")"
   echo "Portas TCP / localhost........: $(grep -icE 'localhost|127.0.0.1|tcp|socket|listen|port|5555' "$SCANFILE")"
@@ -253,6 +254,7 @@ while true; do
   echo "15) Reboot / Boot"
   echo "16) Log cortada / limpa"
   echo "17) Keystore / chaves"
+  echo "18) ADB RSA / autorização"
   echo "0) Sair"
   echo
 
@@ -276,6 +278,7 @@ while true; do
     15) show_matches "Reboot / Boot" "BOOT_COMPLETED|boot completed|reboot|shutdown|sys.boot_completed|init:" "$SCANFILE" ;;
     16) show_matches "Log cortada / limpa" "beginning of|logd|clear|buffer|dropped|truncated|pruned" "$SCANFILE" ;;
     17) show_matches "Keystore / chaves" "keystore|keymint|IKeystore|SecurityLevel|Error::Km|invalidate key|key blob" "$SCANFILE" ;;
+    18) show_matches "ADB RSA / autorização" "UsbDebuggingManager|adb_keys|adbd_auth|authorizing|authorized|fingerprint|RSA|confirm key|allow debugging" "$SCANFILE" ;;
     0) clear; exit ;;
     *) echo "Opção inválida"; sleep 1 ;;
   esac
