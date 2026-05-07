@@ -20,6 +20,28 @@ pause() {
   read -p "Pressione ENTER para voltar..."
 }
 
+critico_log_vazia() {
+  banner
+  echo -e "${RED}╔══════════════════════════════════════╗${RESET}"
+  echo -e "${RED}║ [CRÍTICO] LOGCAT VAZIA / 0 MB        ║${RESET}"
+  echo -e "${RED}╚══════════════════════════════════════╝${RESET}"
+  echo
+  echo -e "${RED}A logcat não foi gerada ou veio vazia.${RESET}"
+  echo
+  echo "Possíveis causas:"
+  echo "- Termux sem permissão para ler logcat"
+  echo "- logcat bloqueada pelo Android"
+  echo "- pareamento/acesso elevado não ativo"
+  echo "- arquivo informado está vazio"
+  echo
+  if [ -f /tmp/logcat_erro.txt ]; then
+    echo -e "${YELLOW}Erro capturado:${RESET}"
+    cat /tmp/logcat_erro.txt
+  fi
+  echo
+  exit 1
+}
+
 gerar_logcat() {
   banner
   echo -e "${YELLOW}[+] Gerando logcat...${RESET}"
@@ -27,7 +49,7 @@ gerar_logcat() {
 
   OUT="/storage/emulated/0/Download/logcat_$(date +%Y%m%d_%H%M%S).txt"
 
-  logcat -d > "$OUT" &
+  logcat -d > "$OUT" 2>/tmp/logcat_erro.txt &
   PID=$!
 
   SPIN='|/-\'
@@ -40,8 +62,13 @@ gerar_logcat() {
   done
 
   wait "$PID"
-
   echo
+
+  if [ ! -s "$OUT" ]; then
+    LOG="$OUT"
+    critico_log_vazia
+  fi
+
   echo -e "${GREEN}[✓] Logcat gerada com sucesso!${RESET}"
   echo -e "${CYAN}Arquivo:${RESET} $OUT"
   sleep 2
@@ -79,6 +106,10 @@ show_matches() {
   echo -e "${YELLOW}[$TITLE]${RESET}"
   echo
 
+  if [ ! -s "$FILE" ]; then
+    critico_log_vazia
+  fi
+
   MATCHES=$(grep -iEn "$PATTERN" "$FILE")
 
   if [ -z "$MATCHES" ]; then
@@ -112,6 +143,10 @@ resumo() {
   banner
   echo -e "${YELLOW}[RESUMO GERAL]${RESET}"
   echo
+
+  if [ ! -s "$SCANFILE" ]; then
+    critico_log_vazia
+  fi
 
   echo "Arquivo analisado: $LOG"
   echo
@@ -156,8 +191,12 @@ else
 fi
 
 if [ ! -f "$LOG" ]; then
-  echo "Arquivo não encontrado."
+  echo -e "${RED}[CRÍTICO] Arquivo não encontrado.${RESET}"
   exit 1
+fi
+
+if [ ! -s "$LOG" ]; then
+  critico_log_vazia
 fi
 
 SCANFILE="/tmp/logcat_scanner_filtrada.txt"
@@ -183,12 +222,16 @@ if [ "$OP_HORA" = "1" ]; then
   fi
 
   awk -v ini="$HINI" '
-  {
-    hora=substr($0,7,8)
-    if (hora >= ini) print
-  }' "$LOG" > "$SCANFILE"
+  match($0, /^[0-9]{2}-[0-9]{2} ([0-9]{2}:[0-9]{2}:[0-9]{2})/, a) {
+    if (a[1] >= ini) print
+  }
+  ' "$LOG" > "$SCANFILE"
 else
   cp "$LOG" "$SCANFILE"
+fi
+
+if [ ! -s "$SCANFILE" ]; then
+  critico_log_vazia
 fi
 
 while true; do
